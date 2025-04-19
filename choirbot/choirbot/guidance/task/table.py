@@ -98,8 +98,8 @@ class PositionTaskTable(TaskTable):
         return PositionTaskArray(tasks=task_list)
     
     def generate_tasks(self):
-        n_new_tasks = self.N - len(self.task_list) # in total we must always have N tasks
-        prob = 0.5
+        n_new_tasks = 10 # in total we must always have N tasks
+        prob = 1
 
         for _ in range(n_new_tasks):
             x_lim = y_lim = [-3, 3]
@@ -108,7 +108,7 @@ class PositionTaskTable(TaskTable):
             position = [position_x, position_y]
             task_id = self.gen_task_id()
             task_seq_num = self.gen_task_seq_num()
-            task = PositionTask(coordinates=position, id=task_id, seq_num=task_seq_num)
+            task = PositionTask(coordinates=position, id=task_id, seq_num=task_seq_num, value=1)
             self.task_list.append(task) # must do this before calling self.gen_task_id() again
 
             # each agent can perform this task with a given probability

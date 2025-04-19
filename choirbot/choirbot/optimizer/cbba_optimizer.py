@@ -4,7 +4,22 @@ import numpy as np
 from threading import Event, Lock
 from .optimizer import Optimizer
 from disropt.agents import Agent
+from choirbot_interfaces.msg import PositionTask
+from choirbot_interfaces.msg import PositionTaskArray
+from collections import namedtuple
+Task = namedtuple('Task', ['id', 'coordinates', 'value', 'seq_num'])
+class TaskList():
+    def __init__(self, tasks):
+        self.tasks = tasks
 
+    def __getitem__(self, index):
+        return self.tasks[index]
+
+    def __len__(self):
+        return len(self.tasks)
+
+    def __iter__(self):
+        return iter(self.tasks)
 class CBBAOptimizer(Optimizer):
     """
     Conensus-Based Bundle Algorithm (CBBA) for distributed task assignment.
@@ -50,7 +65,9 @@ class CBBAOptimizer(Optimizer):
         """ Initialize the problem with a list of tasks.
 
         """
-        self.task_list = task_list
+        self.task_list = TaskList([Task(task.id, task.coordinates, task.value, task.seq_num) for i, task in enumerate(task_list.tasks)])
+        # self.task_list = task_list
+        
         
 
         self.bundle = []
@@ -83,14 +100,14 @@ class CBBAOptimizer(Optimizer):
             current_pos = self.guidance.current_pose.position[:-1]
             distance = np.linalg.norm(task_pos - current_pos)
             # print(f"AGENT: {self.guidance.agent_id} Distance from current position to task {task.id}: {distance}")
-            return pow(self.task_value_weight,self.get_time_to_reach(task.id)) * task.value if hasattr(task, 'value') else -distance 
+            return pow(self.task_value_weight,self.get_time_to_reach(task.id)) * 1 if hasattr(task, 'value') else -distance 
         
         last_task_id = self.path[-1]
         last_task = next((task for task in self.task_list.tasks if task.id == last_task_id), None)
         last_task_pos = np.array(last_task.coordinates)
         distance = np.linalg.norm(task_pos - last_task_pos)
         # print(f"AGENT: {self.guidance.agent_id} Distance from last task {last_task_id} to task {task.id}: {distance}")
-        return pow(self.task_value_weight,self.get_time_to_reach(task.id)) * task.value if hasattr(task, 'value') else -distance 
+        return pow(self.task_value_weight,self.get_time_to_reach(task.id)) * 1 if hasattr(task, 'value') else -distance 
     
     def get_time_to_reach(self, task_id):
         """Calculate the time to reach a task."""
@@ -122,7 +139,6 @@ class CBBAOptimizer(Optimizer):
 
         with self.cbba_lock:
             while len(self.bundle) < self.max_bundle_size:
-                self.iter += 1
                 best_task_id = -1
                 best_score = float('-inf')
                 
@@ -159,7 +175,7 @@ class CBBAOptimizer(Optimizer):
     
     def process_cbba_message(self, sender_id, message):
         """ Processes CBBA message according to conflict resolution rules."""
-        
+        # self.guidance.get_logger().info(f"Agent {self.guidance.agent_id} received message from {sender_id}: {message}")
         if not message or 'winners' not in message:
             print("EARLY RETURN")
             return False
@@ -196,7 +212,7 @@ class CBBAOptimizer(Optimizer):
                     if task_id in self.bundle and self.bid_values[task_id] > sender_bid:
                         # Keep assignment/Update sender
                         sender_winners[task_id] = self.guidance.agent_id
-                        sender_winner_bids[task_id] = self.bid_values[task_id]
+                        sender_winner_bids[task_id] = self.winner_bids[task_id]
                         sender_timestamps[task_id] = len(self.bundle)
                     else:
                         update_needed = True
@@ -235,7 +251,7 @@ class CBBAOptimizer(Optimizer):
                             # Remove this task and all tasks added after it
                             removed_tasks = self.bundle[idx:]
                             self.bundle = self.bundle[:idx]
-                            self.path = self.path[:idx]
+                            self.path = []
                             # Remove tasks from the winners and winner_bids
                             for key in self.winners.keys():
                                 if key > task_id and self.winners[key] != self.guidance.agent_id:
@@ -249,15 +265,17 @@ class CBBAOptimizer(Optimizer):
                             #     if removed_task in self.path:
                             #         self.path.remove(removed_task)
                                     # print(f"Updated path: {self.path}")
-                
+            self.iter += 1
+            return updated   
                 
 
     def consensus(self):
         
         message = self.create_cbba_message()
         try:
-            responses = self.agent.communicator.neighbors_exchange(message, self.guidance.in_neighbors, self.guidance.out_neighbors, True, self._halt_event)
-        
+            responses = self.agent.communicator.neighbors_exchange(message, self.guidance.in_neighbors, self.guidance.out_neighbors, False , self._halt_event)
+            # self.guidance.get_logger().info(f"Agent {self.guidance.agent_id} received messages from neighbors: {self.guidance.in_neighbors}")
+            # self.guidance.get_logger().info(f"Agent {self.guidance.agent_id} ")
         except Exception as e:
             self.guidance.get_logger().error(f"Error in consensus communication: {e}")
             return False
@@ -280,14 +298,15 @@ class CBBAOptimizer(Optimizer):
         1. Bundle Construction: (task selection)
         2. Consensus: (conflict resolution)
         """
-        
+        self.build_bundle()
+        # while len(self.guidance.in_neighbors) < 2:
+        #     time.sleep(0.1)
         self.converged = False
         self.iterations_since_last_change = 0
-
         for iteration in range(self.max_iterations):
             # Add halt event
             print("Iteration: ", iteration)
-
+            
             had_updates = self.consensus()
 
             if had_updates: self.build_bundle()
@@ -298,13 +317,12 @@ class CBBAOptimizer(Optimizer):
                 self.converged = True
                 break
 
-        import time
-        time.sleep(0.01)
 
         if self.converged:
             for _ in range(2):
                 self.consensus()
-            
+        return self.converged
+        
 
     def update_path_from_winners(self):
         """Create path based on CBBA marginal score"""
@@ -377,7 +395,14 @@ class CBBAOptimizer(Optimizer):
         # print(f"AGENT {self.guidance.agent_id} ASSIGNED TASKS: {[task.id for task in assigned_tasks]}")
         # for task in assigned_tasks:
             # print(f"AGENT {self.guidance.agent_id} BID VALUE: {self.bid_values.get(task.id, 0.0)} for task {task.id}")
-        return assigned_tasks
+        
+        # create PositionTaskArray message
+        
+        task_array = [PositionTask(id=task.id, coordinates=task.coordinates, value=task.value, seq_num=task.seq_num) for task in assigned_tasks]
+
+        
+
+        return task_array
 
     def get_cost(self):
         """Get the total cost of the assignment"""
@@ -387,3 +412,6 @@ class CBBAOptimizer(Optimizer):
             total_cost += self.bid_values.get(task_id, 0.0)
 
         return total_cost
+    def get_task_list(self):
+        """Get the task list"""
+        return self.task_list.tasks

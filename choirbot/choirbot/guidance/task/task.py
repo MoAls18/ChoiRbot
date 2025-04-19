@@ -61,12 +61,12 @@ class TaskGuidance(OptimizationGuidance):
     
     def _optimization_ended(self):
         self.get_logger().info('Optimization ended')
-
         # collect results
         result = self.optimizer.get_result()
-        self.get_logger().info('Assigned tasks {}'.format([task.seq_num for task in result]))
-        self.task_queue = result
+        self.get_logger().info(f"Optimization result: {[t.id for t in result]}")
 
+        self.task_queue = result
+        self.get_logger().info(f"{self.agent_id} task queue: {[t.seq_num for t in self.task_queue]}")
         # start new task
         self.task_gc.trigger()
     
@@ -137,5 +137,8 @@ class TaskOptimizationThread(OptimizationThread):
         # initialize and start optimization
         self.guidance.get_logger().info('Data received: starting optimization')
         data = self.data_ready_future.result().tasks
+        # self.guidance.get_logger().info('Data: {}'.format(data))
+        self.optimizer.initialize(self.guidance, self._halt_event)
         self.optimizer.create_problem(data)
+        # self.guidance.get_logger().info(f"Optimizers task_list: {self.optimizer.get_task_list()}")
         self.optimizer.optimize()
