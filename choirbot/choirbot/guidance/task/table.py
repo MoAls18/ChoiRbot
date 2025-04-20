@@ -112,7 +112,7 @@ class PositionTaskTable(TaskTable):
             self.task_list.append(task) # must do this before calling self.gen_task_id() again
 
             # each agent can perform this task with a given probability
-            agents_can_perform = [i for i in range(self.N) if np.random.rand() < prob]
+            agents_can_perform = [i for i in range(self.N)]
             self.bipartite_graph[task_seq_num] = agents_can_perform
 
         self.task_list_comm = self.task_list.copy()
@@ -121,3 +121,4 @@ class PositionTaskTable(TaskTable):
 
     def can_generate_tasks(self):
         return len(self.task_list) < self.N and self.times_tasks_generated < 8
+        

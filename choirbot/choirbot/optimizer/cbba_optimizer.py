@@ -60,6 +60,8 @@ class CBBAOptimizer(Optimizer):
 
         # Create aggent for communication
         self.agent = Agent(in_neighbors=self.guidance.in_neighbors, out_neighbors=self.guidance.out_neighbors,communicator=self.guidance.communicator)
+        # self.guidance.get_loggger().info(f"AGENT {self.guidance.agent_id} Initialized with neighbors: {self.guidance.in_neighbors}")
+        # self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} Initialized with neighbors: {self.guidance.out_neighbors}")
     
     def create_problem(self, task_list):
         """ Initialize the problem with a list of tasks.
@@ -161,7 +163,7 @@ class CBBAOptimizer(Optimizer):
                 self.bid_values[best_task_id] = best_score
                 self.winners[best_task_id] = self.guidance.agent_id
                 self.winner_bids[best_task_id] = best_score
-                self.timestamps[best_task_id] = time.time() # position in bundle as timestamp 
+                self.timestamps[best_task_id] = self.iter # position in bundle as timestamp 
     
     def create_cbba_message(self):
         """Create a CBBA message to share with neighbors."""
@@ -184,7 +186,10 @@ class CBBAOptimizer(Optimizer):
         sender_winners = message['winners']
         sender_winner_bids = message['winner_bids']
         sender_timestamps = message['timestamps']
-        
+        # self.guidance.get_logger().info(f"MY {self.guidance.agent_id} winners: {self.winners}")
+        # self.guidance.get_logger().info(f"MY {self.guidance.agent_id} winner bids: {self.winner_bids}")
+        # self.guidance.get_logger().info(f"Sender  {message['agent_id']} winners: {sender_winners}")
+        # self.guidance.get_logger().info(f"Sender {message['agent_id']} winner bids: {sender_winner_bids}")
         with self.cbba_lock:
             for task_id in self.winners.keys():
                 
@@ -207,15 +212,19 @@ class CBBAOptimizer(Optimizer):
                     # print(f"I agent {self.guidance.agent_id} need to update my knowledge")
                     update_needed = True
                 
+                
                 elif sender_winner == self.guidance.agent_id and my_winner != self.guidance.agent_id:
                     # print("RULE 2 RULE 2")
-                    if task_id in self.bundle and self.bid_values[task_id] > sender_bid:
-                        # Keep assignment/Update sender
-                        sender_winners[task_id] = self.guidance.agent_id
-                        sender_winner_bids[task_id] = self.winner_bids[task_id]
-                        sender_timestamps[task_id] = len(self.bundle)
-                    else:
+                    if my_winner == sender_id:
                         update_needed = True
+                        self.winners[task_id] = -1
+                        self.winner_bids[task_id] = 0.0
+                    elif my_winner != -1:
+                        if sender_timestamp > my_timestamp:
+                            update_needed = True
+                            self.winners[task_id] = -1
+                            self.winner_bids[task_id] = 0.0
+                    
                 
                 elif my_winner != sender_winner:
                     # print("RULE 3 RULE 3")
@@ -231,11 +240,18 @@ class CBBAOptimizer(Optimizer):
                             # print(f"Sender timestamp: {sender_timestamp}, My timestamp: {my_timestamp}")
                             if sender_timestamp > my_timestamp:
                                 update_needed = True
+                            elif sender_timestamp < my_timestamp:
+                                pass
+                            else:
+                                if sender_winner < my_winner:
+                                    update_needed = True
                     elif sender_winner != -1:
                         update_needed = True
                 
                 # print(f"Update needed: {update_needed}")
                 if update_needed:
+                    updated = True
+                    self.iter += 1
                     # update my knowledge
                     self.winners[task_id] = sender_winner
                     self.winner_bids[task_id] = sender_bid
@@ -256,17 +272,18 @@ class CBBAOptimizer(Optimizer):
                             for key in self.winners.keys():
                                 if key > task_id and self.winners[key] != self.guidance.agent_id:
                                     self.winners[key] = -1
+                                    self.timestamps[key] = self.iter
                             for key in self.winner_bids.keys():
                                 if key > task_id and self.winner_bids[key] != self.guidance.agent_id:
                                     self.winner_bids[key] = 0.0
+                                    self.timestamps[key] = self.iter
                             # print(f"Updated bundle: {self.bundle}")
                             # Also remove these tasks from the path
                             # for removed_task in removed_tasks:
                             #     if removed_task in self.path:
                             #         self.path.remove(removed_task)
                                     # print(f"Updated path: {self.path}")
-            self.iter += 1
-            return updated   
+        return updated   
                 
 
     def consensus(self):
@@ -282,6 +299,7 @@ class CBBAOptimizer(Optimizer):
         
         any_updates = False
         for neighbor_id, neighbor_msg in responses.items():
+            self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} received message from {neighbor_id}: {neighbor_msg}")
             if neighbor_msg and self.process_cbba_message(neighbor_id, neighbor_msg):
                 any_updates = True
         
@@ -305,49 +323,107 @@ class CBBAOptimizer(Optimizer):
         self.iterations_since_last_change = 0
         for iteration in range(self.max_iterations):
             # Add halt event
-            print("Iteration: ", iteration)
-            
-            had_updates = self.consensus()
+            if self._halt_event and self._halt_event.is_set():
+                self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} Halting optimization")
+                return False
 
-            if had_updates: self.build_bundle()
+            self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} --- Iteration {iteration + 1}")
+            self.guidance.get_logger().debug(f"AGENT {self.guidance.agent_id} Bundle: {self.bundle}")
+            self.guidance.get_logger().debug(f"AGENT {self.guidance.agent_id} Path: {self.path}")
+            self.guidance.get_logger().debug(f"AGENT {self.guidance.agent_id} Winners: {self.winners}")
+            self.guidance.get_logger().debug(f"AGENT {self.guidance.agent_id} Winner Bids: {self.winner_bids}")
             
-            self.iterations_since_last_change += 1 if not had_updates else 0
-
+            # PHASE 1 MESSAGE COMMUNICATION
+            message = self.create_cbba_message()
+            self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} Exchanging messages...")
+            try:
+                responses = self.agent.communicator.neighbors_exchange(message, self.guidance.in_neighbors, self.guidance.out_neighbors, False , self._halt_event)
+                self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} Message exchange completed. Received {len(responses)} responses.")
+            except Exception as e:
+                self.guidance.get_logger().error(f"Error in consensus communication: {e}")
+                return False
+            
+            # PHASE 2 MESSAGE PROCESSING --- Consensus/Conflict Resolution
+            self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} Processing messages...")
+            any_updates = False
+            for neighbor_id, neighbor_msg in responses.items():
+                self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} received message from {neighbor_id}")
+                if neighbor_msg:
+                    any_updates = self.process_cbba_message(neighbor_id, neighbor_msg)
+                else:
+                    self.guidance.get_logger().warn(f"AGENT {self.guidance.agent_id} Received empty message from neighbor {neighbor_id}")
+            self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} Message processing completed. Any updates: {any_updates}")
+            
+            # BUNDLE UPDATE AS NEEDED
+            if any_updates:
+                self.guidance.get_logger().info(f"--UPDATE OCCURED-- AGENT {self.guidance.agent_id} Bundle updated.")
+                self.build_bundle()
+                self.iterations_since_last_change = 0
+            else:
+                self.guidance.get_logger().info(f"--NO UPDATE-- AGENT {self.guidance.agent_id} No updates.")
+                self.iterations_since_last_change += 1
+            
             if self.iterations_since_last_change >= self.max_no_change_iterations:
+                self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} Converged after {iteration + 1} iterations.")
                 self.converged = True
                 break
-
-
+        
         if self.converged:
+            self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} Running final consensus...")
             for _ in range(2):
-                self.consensus()
+                message = self.create_cbba_message()
+                try:
+                    responses = self.agent.communicator.neighbors_exchange(message, self.guidance.in_neighbors, self.guidance.out_neighbors, False , self._halt_event)
+                    for neighbor_id, neighbor_msg in responses.items():
+                        if neighbor_msg:
+                            self.process_cbba_message(neighbor_id, neighbor_msg)
+                except Exception as e:
+                    self.guidance.get_logger().error(f"Error in consensus communication: {e}")
+        else:
+            self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} Max iterations reached without convergence.")
+        
+        self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} Final Winners: {self.winners}")
+
+        if self.guidance.agent_id == 0:
+            agent_0_tasks = [task for task in self.task_list.tasks if self.winners.get(task.id) == 0]
+            self.guidance.get_logger().warn(f"AGENT 0 FINAL CHECK - WINNING TASKS: {agent_0_tasks}")
+            self.guidance.get_logger().warn(f"AGENT 0 FINAL CHECK - FINAL BUNDLE: {self.bundle}")
+            self.guidance.get_logger().warn(f"AGENT 0 FINAL CHECK - FINAL PATH: {self.path}")
+        
+
+        # self.update_path_from_winners()
         return self.converged
+            
+
         
 
     def update_path_from_winners(self):
         """Create path based on CBBA marginal score"""
+        # with self.cbba_lock:
+        self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} ENTERING UPDATE")
         # Get all tasks assigned to this agent
         assigned_task_ids = []
         for task in self.task_list.tasks:
             if self.winners.get(task.id) == self.guidance.agent_id:
                 assigned_task_ids.append(task.id)
-        
-        # Clear current path
+        self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} ASSIGNED TASKS: {assigned_task_ids}")
+        #  Clear current path
         self.path = []
         
         if not assigned_task_ids:
             return
         
-        remaining_tasks = assigned_task_ids.copy()
+        remaining_tasks = copy.deepcopy(assigned_task_ids)
         current_pos = self.guidance.current_pose.position[:-1]
         
         # Construct path using CBBA marginal scoring logic
         while remaining_tasks:
+            
             best_task_id = None
             best_score = float('-inf')
-            
             for task_id in remaining_tasks:
                 task = next((t for t in self.task_list.tasks if t.id == task_id), None)
+                self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} checking task {task}")
                 if task:
                     # Calculate score using same logic as calculate_marginal_score
                     task_pos = np.array(task.coordinates)
@@ -365,15 +441,20 @@ class CBBAOptimizer(Optimizer):
                         time_to_reach = distance / self.guidance.default_velocity if hasattr(self.guidance, 'default_velocity') else distance
                     
                     # Use same scoring function as in bundle construction
-                    score = pow(self.task_value_weight, time_to_reach) * task.value
+                    score = pow(self.task_value_weight, time_to_reach) * 1
+                    self.guidance.get_logger().info(f"***AGENT {self.guidance.agent_id} Score for task {task_id}: {score}")
                     
                     if score > best_score:
                         best_score = score
                         best_task_id = task_id
             
-            if best_task_id:
+            if best_task_id is not None:
+                self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} ADDING Best task: {best_task_id} with score: {best_score}")
                 self.path.append(best_task_id)
+                self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} Removing from remaining tasks: {best_task_id}")
+                self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} Remaining tasks: {remaining_tasks}")
                 remaining_tasks.remove(best_task_id)
+                self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} Remaining tasks AFTER UPDATE: {remaining_tasks}")
                 # Update current position for next iteration
                 task = next((t for t in self.task_list.tasks if t.id == best_task_id), None)
                 current_pos = task.coordinates
@@ -381,28 +462,49 @@ class CBBAOptimizer(Optimizer):
         
     def get_result(self):
         """Get assigned tasks based on the bundle"""
-        self.update_path_from_winners()
-        # self.update_path_from_winners()
+        self.guidance.get_logger().info(f"*******AGENT {self.guidance.agent_id} ENTERING get_result")
         assigned_tasks = []
-        for task in self.task_list.tasks:
-            if self.winners.get(task.id) == self.guidance.agent_id:
-                assigned_tasks.append(task)
-        
-        if assigned_tasks:
-            task_order = {task_id: idx for idx, task_id in enumerate(self.path)}
-            assigned_tasks.sort(key=lambda task: task_order.get(task.id, float('inf')))
-        # print the step by step order of tasks
-        # print(f"AGENT {self.guidance.agent_id} ASSIGNED TASKS: {[task.id for task in assigned_tasks]}")
-        # for task in assigned_tasks:
-            # print(f"AGENT {self.guidance.agent_id} BID VALUE: {self.bid_values.get(task.id, 0.0)} for task {task.id}")
-        
-        # create PositionTaskArray message
-        
-        task_array = [PositionTask(id=task.id, coordinates=task.coordinates, value=task.value, seq_num=task.seq_num) for task in assigned_tasks]
+        try:
+            self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} entering locking")
+            with self.cbba_lock:
+                self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} get_result: FINAL BUNDLE: {self.bundle}")
+                self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} get_result: PATH BEFORE UPDATE: {self.path}")
+                self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} get_result: FINAL WINNERS: {self.winners}")
 
-        
+                self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} get_result: UPDATING PATH")
+                self.update_path_from_winners()
+                self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} get_result: PATH AFTER UPDATE: {self.path}")
+                task_map = {task.id: task for task in self.task_list.tasks}
+                
+                for task_id in self.path:
+                    if task_id in task_map:
+                        self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} get_result: TASK {task_id} FOUND IN TASK MAP. NOW ADDING")
+                        assigned_tasks.append(task_map[task_id])
+                    else:
+                        self.guidance.get_logger().error(f"AGENT {self.guidance.agent_id} get_result: TASK {task_id} NOT FOUND IN TASK MAP. THIS SHOULD NOT HAPPEN")
+                # for task in self.path:
+                #     task = next((t for t in self.task_list.tasks if t.id == task), None)
+                #     if task:
+                #         assigned_tasks.append(task)
+                    
+                
+                # if assigned_tasks:
+                #     task_order = {task_id: idx for idx, task_id in enumerate(self.path)}
+                #     assigned_tasks.sort(key=lambda task: task_order.get(task.id, float('inf')))
+                # print the step by step order of tasks
+                # print(f"AGENT {self.guidance.agent_id} ASSIGNED TASKS: {[task.id for task in assigned_tasks]}")
+                # for task in assigned_tasks:
+                    # print(f"AGENT {self.guidance.agent_id} BID VALUE: {self.bid_values.get(task.id, 0.0)} for task {task.id}")
+                
+                # create PositionTaskArray message
+                
 
-        return task_array
+                
+            self.guidance.get_logger().warn(f"AGENT {self.guidance.agent_id} get_result: FINAL ASSIGNED TASKS: {[task.id for task in assigned_tasks]} NOW EXITING")
+            return assigned_tasks
+        except Exception as e:
+            self.guidance.get_logger().error(f"!!!!!!!! AGENT {self.guidance.agent_id} EXCEPTION IN get_result: {e} !!!!!!!!", exc_info=True)
+            return []
 
     def get_cost(self):
         """Get the total cost of the assignment"""
