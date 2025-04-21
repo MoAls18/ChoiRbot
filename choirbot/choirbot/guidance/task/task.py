@@ -1,4 +1,5 @@
 from collections import defaultdict
+import csv
 import time
 import rclpy
 from rclpy.task import Future
@@ -12,6 +13,7 @@ from .executor import TaskExecutor
 from ..guidance import OptimizationGuidance
 from ..optimization_thread import OptimizationThread
 from ...utils import OrEvent
+from choirbot_interfaces.msg import PositionTaskArray
 
 
 class TaskGuidance(OptimizationGuidance):
@@ -33,7 +35,10 @@ class TaskGuidance(OptimizationGuidance):
         self._neighbor_optimization_status = defaultdict(lambda: False)
         self._sync_timeout = 10.0
         self._sync_check_interval = 0.5
-
+        self.start_time = None
+        self.end_time = None
+        self.log_data = dict()
+        self.log_task_completion_time = dict()
 
         # triggering mechanism to start optimization
         self.opt_trigger_subscription = self.create_subscription(
@@ -54,9 +59,11 @@ class TaskGuidance(OptimizationGuidance):
         self.task_completion_client.wait_for_service()
 
         self.get_logger().info('Guidance {} started'.format(self.agent_id))
+        
     
     def start_optimization(self, _):
         self.get_logger().info('Optimization triggered: requesting task list')
+        self.start_time = self.get_clock().now()
         self._local_optimization_complete = False
         self._neighbor_optimization_status = defaultdict(lambda: False)
         # remove all enqueued tasks
@@ -78,16 +85,25 @@ class TaskGuidance(OptimizationGuidance):
         self.optimization_thread.optimize(future)
     
     def _optimization_ended(self):
+        self.end_time = self.get_clock().now()
         self.get_logger().warn(f"************* AGENT {self.agent_id} Entered _Optimization ended *************")
         self.get_logger().info('Optimization ended')
         # collect results
         result = self.optimizer.get_result()
         self.get_logger().info(f"AGENT {self.agent_id} Optimization result: {[t.id for t in result]}")
-
+        self.log_data['agent_id'] = self.agent_id
+        self.log_data['optimization_time'] = (self.end_time - self.start_time).nanoseconds / 1e9
+        self.log_data['iterations'] = self.optimizer.get_iterations()
+        self.log_data['tasks'] = [t.seq_num for t in result]
         self.task_queue = result
         self.get_logger().info(f"AGENT {self.agent_id} task queue: {[t.seq_num for t in self.task_queue]}")
+        with open(f'optimization_log_agents_{len(self.in_neighbors) + 1}{time.strftime("%m %d", time.localtime())}.csv', 'a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=self.log_data.keys())
+            writer.writeheader()
+            writer.writerow(self.log_data)
         # start new task
         self.task_gc.trigger()
+        
     
     def start_new_task(self):
         # stop if there are no new tasks
@@ -113,10 +129,14 @@ class TaskGuidance(OptimizationGuidance):
     def task_ended(self):
         # log to console
         self.get_logger().info('Task completed (seq_num {})'.format(self.current_task.seq_num))
-
+        self.task_completion_time = self.get_clock().now() - self.start_time
+        self.log_task_completion_time[self.current_task.id] = self.task_completion_time.nanoseconds / 1e9
+        with open(f'task_completion_log_agents_{len(self.in_neighbors)+1}_{time.strftime("%m %d", time.localtime())}.csv', 'a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=['agent_id', 'seq_num', 'completion_time'])
+            writer.writerow({'agent_id': self.agent_id, 'seq_num': self.current_task.seq_num, 'completion_time': self.task_completion_time.nanoseconds / 1e9})
+            
         # add task to list of completed tasks
         self.completed_tasks.append(self.current_task.id)
-
         # notify table that task execution has completed
         request = TaskCompletionService.Request()
         request.agent_id = self.agent_id

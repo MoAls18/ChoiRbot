@@ -82,6 +82,7 @@ class CBBAOptimizer(Optimizer):
         # Reset Convergence checks
         self.converged = False
         self.iterations_since_last_change = 0
+        self.iteration_count = 0
 
         # Default max bundle size to the number of tasks if not specified
         if self.max_bundle_size is None:
@@ -322,6 +323,7 @@ class CBBAOptimizer(Optimizer):
         self.converged = False
         self.iterations_since_last_change = 0
         for iteration in range(self.max_iterations):
+            self.iteration_count += 1
             # Add halt event
             if self._halt_event and self._halt_event.is_set():
                 self.guidance.get_logger().info(f"AGENT {self.guidance.agent_id} Halting optimization")
@@ -517,3 +519,6 @@ class CBBAOptimizer(Optimizer):
     def get_task_list(self):
         """Get the task list"""
         return self.task_list.tasks
+    
+    def get_iterations(self):
+        return self.iteration_count

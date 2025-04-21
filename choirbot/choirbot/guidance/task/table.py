@@ -1,3 +1,4 @@
+import subprocess
 from rclpy.node import Node
 from choirbot_interfaces.msg import PositionTask, PositionTaskArray
 from choirbot_interfaces.srv import PositionTaskService, TaskCompletionService
@@ -36,7 +37,9 @@ class TaskTable(Node):
 
         task_list_print = [t.seq_num for t in filtered_tasks]
         self.get_logger().info('Sending task list to agent {}: {}'.format(agent, task_list_print))
-
+        self.create_publisher(PositionTaskArray, f'/task_list_static_{self.label}', 100).publish(response.tasks)
+        # if self.label == 1:
+        #     self.start_recording()
         return response
     
     def task_completion_service(self, request, response):
@@ -87,6 +90,11 @@ class TaskTable(Node):
 
     def can_generate_tasks(self):
         raise NotImplementedError
+    
+    # def start_recording(self):
+        # Start recording the bag
+        # subprocess.Popen(['ros2', 'bag', 'record', '-o', 'crazychoir_task_assignment_webots_bag', '-a'])
+        # self.get_logger().info('Bag recording started')
 
 class PositionTaskTable(TaskTable):
 
@@ -98,7 +106,7 @@ class PositionTaskTable(TaskTable):
         return PositionTaskArray(tasks=task_list)
     
     def generate_tasks(self):
-        n_new_tasks = 10 # in total we must always have N tasks
+        n_new_tasks = self.N # in total we must always have N tasks
         prob = 1
 
         for _ in range(n_new_tasks):
@@ -116,9 +124,8 @@ class PositionTaskTable(TaskTable):
             self.bipartite_graph[task_seq_num] = agents_can_perform
 
         self.task_list_comm = self.task_list.copy()
-        self.times_tasks_generated += 1
+        self.times_tasks_generated = 1
         self.label += 1
-
     def can_generate_tasks(self):
-        return len(self.task_list) < self.N and self.times_tasks_generated < 8
+        return self.times_tasks_generated < 1
         
